@@ -11,7 +11,7 @@ __pycache__/
 *.pyo
 
 # Test / scratch artifacts
-segtool/_test_preview.png
+segtool/_*.png
 
 # Example input images (copyrighted third-party art); add your own locally
 images/*

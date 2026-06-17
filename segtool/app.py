@@ -41,6 +41,7 @@ class State:
         self.points = []        # [[x, y, label], ...]  label 1=add 0=remove
         self.box = None         # [x0, y0, x1, y1]
         self.mask = None        # np bool HxW
+        self.logits = None      # low-res SAM logits, fed back for incremental refinement
 
 
 S = State()
@@ -50,24 +51,36 @@ SEG = SegAny(DEFAULT_CKPT, use_bfloat16=True)
 print("SAM ready on", SEG.device)
 
 
-def recompute():
-    """Run SAM with the current prompts -> S.mask."""
+def recompute(incremental=True):
+    """Run SAM with the current prompts -> S.mask.
+
+    Incremental refinement: feed the previous prediction's low-res logits back as
+    mask_input so each added point *adjusts* the current mask instead of
+    re-segmenting from scratch (more local / stable). Pass incremental=False to
+    start a fresh chain (e.g. after undo or a new box).
+    """
     if S.image is None or (not S.points and S.box is None):
         S.mask = None
+        S.logits = None
         return
     pts = np.array([[p[0], p[1]] for p in S.points], dtype=float) if S.points else None
     lbls = np.array([p[2] for p in S.points], dtype=int) if S.points else None
     box = np.array(S.box, dtype=float) if S.box is not None else None
+    mask_input = S.logits[None, :, :] if (incremental and S.logits is not None) else None
+    # multimask only to resolve the ambiguity of a single lone point (no box, no prior mask)
+    multimask = mask_input is None and box is None and len(S.points) == 1
     with torch.inference_mode(), torch.autocast(
         SEG.device, dtype=SEG.model_dtype, enabled=torch.cuda.is_available()
     ):
         masks, scores, logits = SEG.predictor.predict(
-            point_coords=pts, point_labels=lbls, box=box, multimask_output=False
+            point_coords=pts, point_labels=lbls, box=box,
+            mask_input=mask_input, multimask_output=multimask,
         )
-    m = np.asarray(masks)
-    if m.ndim == 3:
-        m = m[0]
-    S.mask = m.astype(bool)
+    masks = np.asarray(masks)
+    logits = np.asarray(logits)
+    best = int(np.argmax(scores)) if multimask else 0
+    S.mask = (masks[best] if masks.ndim == 3 else masks).astype(bool)
+    S.logits = logits[best].astype(np.float32)  # (256,256), reused next refinement
 
 
 @app.route("/")
@@ -150,7 +163,7 @@ def api_load():
         S.image = np.array(img)
         S.size = [img.width, img.height]
         S.image_path = path
-        S.points, S.box, S.mask = [], None, None
+        S.points, S.box, S.mask, S.logits = [], None, None, None
         SEG.set_image(S.image)
         S.version += 1
     return jsonify({"ok": True, "size": S.size, "path": path})
@@ -167,7 +180,7 @@ def api_upload():
         S.image = np.array(img)
         S.size = [img.width, img.height]
         S.image_path = f.filename  # display name only
-        S.points, S.box, S.mask = [], None, None
+        S.points, S.box, S.mask, S.logits = [], None, None, None
         SEG.set_image(S.image)
         S.version += 1
     return jsonify({"ok": True, "size": S.size, "path": f.filename})
@@ -194,6 +207,7 @@ def api_box():
         if S.image is None:
             return jsonify({"ok": False, "error": "no image"}), 400
         S.box = [float(v) for v in box]
+        S.logits = None  # a new box is a fresh anchor; don't bias it with the prior mask
         recompute()
         S.version += 1
     return jsonify({"ok": True, "has_mask": S.mask is not None})
@@ -206,7 +220,8 @@ def api_undo():
             S.points.pop()
         elif S.box is not None:
             S.box = None
-        recompute()
+        S.logits = None              # drop stale logits; rebuild fresh from remaining prompts
+        recompute(incremental=False)
         S.version += 1
     return jsonify({"ok": True, "points": len(S.points)})
 
@@ -214,7 +229,7 @@ def api_undo():
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     with lock:
-        S.points, S.box, S.mask = [], None, None
+        S.points, S.box, S.mask, S.logits = [], None, None, None
         S.version += 1
     return jsonify({"ok": True})
 
