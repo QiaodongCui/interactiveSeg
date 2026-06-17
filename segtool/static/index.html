@@ -36,6 +36,7 @@
     <span class="tag">img <b id="imgname">—</b></span>
     <span class="tag">pts <b id="ptcount">0</b></span>
     <span class="tag">cov <b id="cov">0%</b></span>
+    <span class="tag">gran <b id="gran">—</b></span>
     <span class="tag">zoom <b id="zoom">—</b></span>
     <span class="tag" id="modeltag">—</span>
     <span class="sp"></span>
@@ -43,6 +44,7 @@
     <button onclick="document.getElementById('file').click()">Browse… (load image)</button>
     <button onclick="setFit()">Fit (f)</button>
     <button onclick="setHundred()">1:1 (0)</button>
+    <button onclick="cycleGran()">Granularity (g)</button>
     <button onclick="api('/api/undo')">Undo (z)</button>
     <button onclick="api('/api/reset')">Reset (r)</button>
     <button class="primary" onclick="exportMerged()">Export merged (e)</button>
@@ -56,7 +58,7 @@
     <span class="sp"></span>
     <span class="tag">click a chip to make it active · double-click to rename</span>
   </div>
-  <div id="hint">Left-click <b>add</b> · Right-click <b>remove</b> · Drag <b>box</b> · Wheel <b>zoom</b> · Middle-drag <b>pan</b> &nbsp;—&nbsp; prompts apply to the <b>active</b> object</div>
+  <div id="hint">Left-click <b>add</b> · Right-click <b>remove</b> · Drag <b>box</b> · Wheel <b>zoom</b> · Middle-drag <b>pan</b> · Granularity <b>g</b> (after 1 click) &nbsp;—&nbsp; prompts apply to the <b>active</b> object</div>
   <div id="viewport">
     <div id="empty">No image loaded. Use Browse… or tell Claude which image to load.</div>
     <div id="stage" style="display:none">
@@ -79,6 +81,11 @@ function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.
 function computeFit(){ const [W,H]=st.size; if(!W) return 1; const aw=viewport.clientWidth-22, ah=viewport.clientHeight-22; return Math.min(aw/W, ah/H, 1); }
 function clampScale(s){ const f=computeFit(); return Math.min(Math.max(s, f), f*16); }
 function zoomLabel(){ document.getElementById('zoom').textContent = st.size[0] ? Math.round(scale*100)+'%' : '—'; }
+function granLabel(){ const n=st.gran_levels||0, g=st.gran;
+  const names = n===4?['auto','subpart','part','whole'] : (n===3?['subpart','part','whole']:null);
+  document.getElementById('gran').textContent = n>0 ? ((g+1)+'/'+n+(names?(' '+names[g]):'')) : '—'; }
+async function cycleGran(){ if(!(st.gran_levels>0)){ toast('Granularity: only right after a single click (before a box / 2nd point)'); return; }
+  await post('/api/granularity',{delta:1}); refresh(true); }
 
 function layout(){
   const [W,H]=st.size; const dW=Math.round(W*scale), dH=Math.round(H*scale);
@@ -110,12 +117,13 @@ function renderChips(){
 async function refresh(force){
   let s; try{ s=await (await fetch('/api/state')).json(); }catch(e){ return; }
   document.getElementById('modeltag').textContent = s.model+' @ '+s.device;
-  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; renderChips(); zoomLabel(); return; }
+  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; renderChips(); zoomLabel(); granLabel(); return; }
   st=s;
   const act=(s.objects||[])[s.active];
   document.getElementById('imgname').textContent = s.image_path ? s.image_path.split(/[\\/]/).pop() : '—';
   document.getElementById('ptcount').textContent = s.points.length + (s.box?' +box':'');
   document.getElementById('cov').textContent = (act?act.coverage:0)+'%';
+  granLabel();
   empty.style.display='none'; stage.style.display='block';
   const pathChanged=s.image_path!==lastPath, verChanged=s.version!==lastVer;
   if(pathChanged){ lastPath=s.image_path; scale=computeFit(); fitted=true; base.src='/api/image.png?v='+s.version; }
@@ -206,7 +214,7 @@ async function exportEach(){
 
 addEventListener('keydown', e=>{ if(['INPUT'].includes(e.target.tagName)) return;
   if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportMerged();
-  else if(e.key==='n') api('/api/object/new'); else if(e.key==='f') setFit(); else if(e.key==='0') setHundred(); });
+  else if(e.key==='n') api('/api/object/new'); else if(e.key==='g') cycleGran(); else if(e.key==='f') setFit(); else if(e.key==='0') setHundred(); });
 addEventListener('resize', ()=>{ if(fitted){ scale=computeFit(); layout(); redraw(); } else zoomLabel(); });
 setInterval(()=>refresh(false), 700);
 refresh(true);

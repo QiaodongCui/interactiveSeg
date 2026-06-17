@@ -51,6 +51,8 @@ class Obj:
         self.box = None      # [x0, y0, x1, y1]
         self.mask = None     # np bool HxW
         self.logits = None   # low-res logits for incremental refinement
+        self.cands = None    # granularity candidates [{mask,logits}] small->large (single-point only)
+        self.gran = 0        # index into cands
 
     def summary(self):
         return {
@@ -94,24 +96,99 @@ def recompute(obj, incremental=True):
         if obj is not None:
             obj.mask = None
             obj.logits = None
+            obj.cands = None
         return
-    pts = np.array([[p[0], p[1]] for p in obj.points], dtype=float) if obj.points else None
-    lbls = np.array([p[2] for p in obj.points], dtype=int) if obj.points else None
     box = np.array(obj.box, dtype=float) if obj.box is not None else None
     mask_input = obj.logits[None, :, :] if (incremental and obj.logits is not None) else None
-    multimask = mask_input is None and box is None and len(obj.points) == 1
+    single_point = mask_input is None and box is None and len(obj.points) == 1
+
+    # A lone first click is ambiguous -> offer SAM's subpart/part/whole granularities.
+    if single_point:
+        gc = _granularity_candidates(obj)
+        if gc is not None:
+            obj.cands, obj.gran = gc
+            _apply_gran(obj)
+            return
+
+    obj.cands = None
+    pts = np.array([[p[0], p[1]] for p in obj.points], dtype=float) if obj.points else None
+    lbls = np.array([p[2] for p in obj.points], dtype=int) if obj.points else None
     with torch.inference_mode(), torch.autocast(
         SEG.device, dtype=SEG.model_dtype, enabled=torch.cuda.is_available()
     ):
         masks, scores, logits = SEG.predictor.predict(
             point_coords=pts, point_labels=lbls, box=box,
-            mask_input=mask_input, multimask_output=multimask,
+            mask_input=mask_input, multimask_output=single_point,
         )
     masks = np.asarray(masks)
     logits = np.asarray(logits)
-    best = int(np.argmax(scores)) if multimask else 0
+    best = int(np.argmax(scores)) if single_point else 0
     obj.mask = (masks[best] if masks.ndim == 3 else masks).astype(bool)
-    obj.logits = logits[best].astype(np.float32)
+    obj.logits = (logits[best] if logits.ndim == 3 else logits).astype(np.float32)
+
+
+def _apply_gran(obj):
+    c = obj.cands[obj.gran]
+    obj.mask = c["mask"]
+    obj.logits = c["logits"]
+
+
+def _granularity_candidates(obj):
+    """Best-effort granularity choices for a single point.
+
+    HQ-SAM collapses multimask to one tight mask (adding the HQ token vetoes the
+    larger SAM scopes), so we call the decoder directly and offer 4 states:
+        0 = auto  -> the normal HQ-quality mask (best SAM scope + HQ token)
+        1..3      = the raw SAM scopes subpart / part / whole (HQ token omitted)
+    Returns (cands, default_index=0) or None if the model internals differ.
+    """
+    pred = SEG.predictor
+    model = pred.model
+    dec = getattr(model, "mask_decoder", None)
+    if dec is None or not hasattr(dec, "predict_masks") or not hasattr(dec, "compress_vit_feat"):
+        return None
+    try:
+        device = SEG.device
+        pts = np.array([[p[0], p[1]] for p in obj.points], dtype=float)
+        lbls = np.array([p[2] for p in obj.points], dtype=int)
+        coords = pred.transform.apply_coords(pts, pred.original_size)
+        coords_t = torch.as_tensor(coords, dtype=torch.float, device=device)[None]
+        labels_t = torch.as_tensor(lbls, dtype=torch.int, device=device)[None]
+
+        def to_cand(low_ch):
+            full = model.postprocess_masks(low_ch, pred.input_size, pred.original_size)
+            mask = (full > model.mask_threshold)[0, 0].detach().cpu().numpy().astype(bool)
+            logits = low_ch[0, 0].float().detach().cpu().numpy().astype(np.float32)
+            return mask, logits
+
+        with torch.inference_mode(), torch.autocast(
+            device, dtype=SEG.model_dtype, enabled=torch.cuda.is_available()
+        ):
+            sparse, dense = model.prompt_encoder(points=(coords_t, labels_t), boxes=None, masks=None)
+            vit = pred.interm_features[0].permute(0, 3, 1, 2)
+            hq_feat = dec.embedding_encoder(pred.features) + dec.compress_vit_feat(vit)
+            low, iou = dec.predict_masks(
+                image_embeddings=pred.features,
+                image_pe=model.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse,
+                dense_prompt_embeddings=dense,
+                hq_features=hq_feat,
+            )
+            n = dec.num_mask_tokens
+            sam = low[:, 1:n - 1]                      # (1,3,256,256) SAM scopes
+            hq = low[:, n - 1:n]                       # (1,1,256,256) HQ token
+            best = int(np.argmax(iou[0, 1:n - 1].float().detach().cpu().numpy()))
+            auto_m, auto_lg = to_cand(sam[:, best:best + 1] + hq)   # normal HQ output
+            scopes = []
+            for g in range(sam.shape[1]):
+                m, lg = to_cand(sam[:, g:g + 1])
+                scopes.append((int(m.sum()), m, lg))
+        scopes.sort(key=lambda t: t[0])               # subpart -> part -> whole
+        cands = [{"mask": auto_m, "logits": auto_lg}] + [{"mask": m, "logits": lg} for _, m, lg in scopes]
+        return cands, 0
+    except Exception as e:
+        print("granularity unavailable:", repr(e))
+        return None
 
 
 def bump():
@@ -136,6 +213,8 @@ def api_state():
         "objects": [o.summary() for o in S.objects],
         "points": cur.points if cur else [],
         "box": cur.box if cur else None,
+        "gran": cur.gran if (cur and cur.cands) else -1,
+        "gran_levels": len(cur.cands) if (cur and cur.cands) else 0,
     })
 
 
@@ -303,6 +382,21 @@ def api_reset():
             cur.points, cur.box, cur.mask, cur.logits = [], None, None, None
         bump()
     return jsonify({"ok": True})
+
+
+@app.route("/api/granularity", methods=["POST"])
+def api_granularity():
+    """Cycle the active object's mask among SAM's size-sorted candidates (single-point only)."""
+    data = request.get_json(force=True) or {}
+    delta = int(data.get("delta", 1))
+    with lock:
+        cur = S.cur()
+        if cur is None or not cur.cands:
+            return jsonify({"ok": False, "error": "no granularity options here"}), 400
+        cur.gran = (cur.gran + delta) % len(cur.cands)
+        _apply_gran(cur)
+        bump()
+    return jsonify({"ok": True, "gran": cur.gran, "levels": len(cur.cands)})
 
 
 @app.route("/api/object/new", methods=["POST"])

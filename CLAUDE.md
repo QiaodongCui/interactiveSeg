@@ -39,13 +39,19 @@ assistant or script can drive it (load images, add prompts, export). Segmentatio
 
 ## Architecture
 
-- `segtool/app.py` — Flask backend. Holds a single global `State` (current image,
-  prompts, mask) and one `SegAny` (HQ-SAM) instance. GPU calls are serialized with a lock.
-  REST API: `POST /api/{load,click,box,undo,reset,export}`, `GET /api/{state,image.png,mask.png,preview.png}`.
-  `/api/preview.png` returns the image with the selection bright / rest dimmed (used to
-  visually verify a selection programmatically).
-- `segtool/static/index.html` — single-page UI. Left-click=add, right-click=remove,
-  drag=box; polls `/api/state` every 700 ms so external (API-driven) changes show up live.
+- `segtool/app.py` — Flask backend. Global `State` holds the current image plus a list of
+  **objects**, each with its own points/box/mask/logits (independent SAM predictions, no
+  cross-talk) and an active-object pointer. One `SegAny` (HQ-SAM) instance; GPU calls are
+  serialized with a lock. Each object refines **incrementally** (prior low-res logits fed
+  back as `mask_input`). REST API: `POST /api/{load,upload,click,box,undo,reset,granularity,
+  export,object/{new,select,delete,rename}}`, `GET /api/{state,image.png,mask.png,preview.png,
+  cutout.png}`. `/api/preview.png` = union of masks bright / rest dimmed (for programmatic
+  verification); `/api/cutout.png?mode=merged|active&obj=<id>` returns cutout bytes for the
+  browser file-save dialog.
+- `segtool/static/index.html` — single-page UI. Left-click=add, right-click=remove, drag=box,
+  wheel=zoom, middle-drag=pan; object chips to add/select/delete/rename; `g` cycles
+  granularity; exports use the native file picker. Polls `/api/state` every 700 ms so
+  external (API-driven) changes show up live.
 - `birefnet_run.py` — BiRefNet matting + ToonOut anime fine-tune via HuggingFace `transformers`.
 - `isat_smoketest.py`, `isat_refine.py`, `diag_toonout.py` — dev/experiment scripts.
 
@@ -61,6 +67,11 @@ assistant or script can drive it (load images, add prompts, export). Segmentatio
   `birefnet_run.py`.
 - **One-shot anime models cannot isolate one character** from busy/decorated multi-character
   images — that's what SegPick's interactive box+click flow is for.
+- **HQ-SAM collapses multimask granularities.** `predict(multimask_output=True)` returns a
+  single mask (the HQ token's logits veto the larger SAM scopes), so the subpart/part/whole
+  toggle can't use the public API. `_granularity_candidates()` calls the HQ
+  `mask_decoder.predict_masks` directly to recover the 3 raw SAM scopes; `auto` (default)
+  keeps the HQ-quality mask. Wrapped in try/except → falls back to the single mask.
 
 ## Conventions
 
