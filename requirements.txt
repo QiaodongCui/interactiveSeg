@@ -1,0 +1,15 @@
+# SegPick interactive segmentation tool — Python 3.12, Windows/Linux + NVIDIA GPU
+#
+# Install CUDA torch FIRST from the PyTorch index (do NOT rely on the lines below
+# for torch), e.g.:
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+# then:  pip install -r requirements.txt
+
+isat-sam>=1.5.2     # provides the SAM/HQ-SAM/SAM2 backend + checkpoint manager
+flask>=3.0
+pillow
+numpy
+
+# torch / torchvision are required but must come from the CUDA wheel index (see above).
+torch>=2.1.1
+torchvision

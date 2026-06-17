@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SegPick</title>
+<style>
+  :root { --bg:#15171c; --panel:#1f232b; --fg:#e6e9ef; --muted:#868f9f; --accent:#27c2a0; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,Segoe UI,sans-serif; }
+  #bar { display:flex; gap:10px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid #000; flex-wrap:wrap; }
+  #bar .sp { flex:1; }
+  button { background:#2b313b; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover { background:#343b47; }
+  button.primary { background:var(--accent); color:#04201a; border-color:var(--accent); font-weight:600; }
+  input[type=text] { background:#11141a; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 8px; width:300px; }
+  .tag { color:var(--muted); white-space:nowrap; } .tag b { color:var(--fg); }
+  #hint { color:var(--muted); padding:5px 12px; font-size:12px; }
+  #empty { color:var(--muted); text-align:center; margin-top:90px; font-size:15px; }
+  #stage { position:relative; margin:12px auto; line-height:0; box-shadow:0 0 0 1px #000, 0 8px 30px #0007; }
+  #base,#mask { position:absolute; left:0; top:0; user-select:none; -webkit-user-drag:none; }
+  #base { z-index:1; } #mask { z-index:2; pointer-events:none; }
+  #draw { position:absolute; left:0; top:0; z-index:3; cursor:crosshair; }
+  #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#000c; border:1px solid #3a414d; padding:9px 15px; border-radius:8px; opacity:0; transition:opacity .2s; z-index:10; max-width:80vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+</style>
+</head>
+<body>
+  <div id="bar">
+    <b style="color:var(--accent)">SegPick</b>
+    <span class="tag">img <b id="imgname">—</b></span>
+    <span class="tag">sel <b id="ptcount">0</b></span>
+    <span class="tag">cov <b id="cov">0%</b></span>
+    <span class="tag" id="modeltag">—</span>
+    <span class="sp"></span>
+    <input id="path" type="text" placeholder="image path (or just tell Claude to load one)"/>
+    <button onclick="loadPath()">Load</button>
+    <button onclick="api('/api/undo')">Undo (z)</button>
+    <button onclick="api('/api/reset')">Reset (r)</button>
+    <button class="primary" onclick="exportCut()">Export PNG (e)</button>
+  </div>
+  <div id="hint">Left-click <b>add</b> &nbsp;•&nbsp; Right-click <b>remove</b> &nbsp;•&nbsp; Drag <b>box</b> &nbsp;•&nbsp; mask updates after each action</div>
+  <div id="empty">No image loaded. Tell Claude which image to load, or type a path above and click Load.</div>
+  <div id="stage" style="display:none">
+    <img id="base"/>
+    <img id="mask"/>
+    <canvas id="draw"></canvas>
+  </div>
+  <div id="toast"></div>
+
+<script>
+let st = { version:-1, size:[0,0], points:[], box:null };
+let scale = 1, lastPath = null, lastVer = -1;
+const base=document.getElementById('base'), mask=document.getElementById('mask');
+const draw=document.getElementById('draw'), ctx=draw.getContext('2d');
+const stage=document.getElementById('stage'), empty=document.getElementById('empty');
+
+function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,2200); }
+function fitScale(W,H){ return Math.min((innerWidth-40)/W, (innerHeight-115)/H, 1); }
+
+function layout(){
+  const [W,H]=st.size; scale=fitScale(W,H);
+  const dW=Math.round(W*scale), dH=Math.round(H*scale);
+  stage.style.width=dW+'px'; stage.style.height=dH+'px';
+  for(const el of [base,mask]){ el.style.width=dW+'px'; el.style.height=dH+'px'; }
+  draw.width=dW; draw.height=dH; draw.style.width=dW+'px'; draw.style.height=dH+'px';
+}
+function redraw(){
+  ctx.clearRect(0,0,draw.width,draw.height);
+  if(st.box){ const [x0,y0,x1,y1]=st.box.map(v=>v*scale);
+    ctx.strokeStyle='#ffd23f'; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(x0,y0,x1-x0,y1-y0); ctx.setLineDash([]); }
+  for(const [x,y,l] of st.points){ ctx.beginPath(); ctx.arc(x*scale,y*scale,5,0,7);
+    ctx.fillStyle=l?'#27e08a':'#ff5a5a'; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#000a'; ctx.stroke(); }
+}
+
+async function refresh(force){
+  let s; try{ s=await (await fetch('/api/state')).json(); }catch(e){ return; }
+  document.getElementById('modeltag').textContent = s.model+' @ '+s.device;
+  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; return; }
+  st=s;
+  document.getElementById('imgname').textContent = s.image_path ? s.image_path.split(/[\\/]/).pop() : '—';
+  document.getElementById('ptcount').textContent = s.points.length + (s.box?' +box':'');
+  document.getElementById('cov').textContent = (s.coverage||0)+'%';
+  empty.style.display='none'; stage.style.display='block';
+  const pathChanged=s.image_path!==lastPath, verChanged=s.version!==lastVer;
+  if(pathChanged||verChanged||force) layout();
+  if(pathChanged){ lastPath=s.image_path; base.src='/api/image.png?v='+s.version; }
+  if(verChanged||force){ lastVer=s.version; mask.src='/api/mask.png?v='+s.version; }
+  redraw();
+}
+
+let down=null, moved=false;
+draw.addEventListener('mousedown', e=>{ if(e.button!==0) return; down=[e.offsetX,e.offsetY]; moved=false; });
+draw.addEventListener('mousemove', e=>{ if(!down) return;
+  if(Math.hypot(e.offsetX-down[0],e.offsetY-down[1])>5) moved=true;
+  if(moved){ redraw(); ctx.strokeStyle='#ffd23f'; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(down[0],down[1],e.offsetX-down[0],e.offsetY-down[1]); ctx.setLineDash([]); } });
+draw.addEventListener('mouseup', async e=>{ if(!down) return; const s=down; down=null;
+  if(moved){ await post('/api/box',{x0:s[0]/scale,y0:s[1]/scale,x1:e.offsetX/scale,y1:e.offsetY/scale}); }
+  else { await post('/api/click',{x:e.offsetX/scale,y:e.offsetY/scale,label:1}); }
+  refresh(true); });
+draw.addEventListener('contextmenu', async e=>{ e.preventDefault();
+  await post('/api/click',{x:e.offsetX/scale,y:e.offsetY/scale,label:0}); refresh(true); });
+
+async function post(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); }
+async function api(u){ await post(u,{}); refresh(true); }
+async function loadPath(){ const p=document.getElementById('path').value; if(!p) return;
+  const r=await (await post('/api/load',{path:p})).json(); if(!r.ok) toast('Load failed: '+(r.error||'')); else toast('Loaded'); refresh(true); }
+async function exportCut(){ const r=await (await post('/api/export',{})).json();
+  toast(r.ok?('Saved → '+r.path):('Export failed: '+(r.error||''))); }
+
+addEventListener('keydown', e=>{ if(['INPUT'].includes(e.target.tagName)) return;
+  if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportCut(); });
+addEventListener('resize', ()=>refresh(true));
+setInterval(()=>refresh(false), 700);
+refresh(true);
+</script>
+</body>
+</html>

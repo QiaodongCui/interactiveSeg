@@ -1,0 +1,22 @@
+# Virtual environments (multi-GB; recreate via README)
+.venv/
+.venv-gpu/
+.venv-isat/
+
+# Generated outputs, caches, logs
+out/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+
+# Test / scratch artifacts
+segtool/_test_preview.png
+
+# Example input images (copyrighted third-party art); add your own locally
+images/*
+!images/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
