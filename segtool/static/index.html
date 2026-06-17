@@ -9,28 +9,32 @@
   * { box-sizing:border-box; }
   html,body { height:100%; }
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,Segoe UI,sans-serif; display:flex; flex-direction:column; }
-  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid #000; flex-wrap:wrap; }
-  #bar .sp { flex:1; }
+  #bar,#objbar { display:flex; gap:8px; align-items:center; padding:7px 12px; background:var(--panel); border-bottom:1px solid #000; flex-wrap:wrap; }
+  #objbar { background:#1a1d24; }
+  .sp { flex:1; }
   button { background:#2b313b; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 11px; cursor:pointer; font-size:13px; }
   button:hover { background:#343b47; }
   button.primary { background:var(--accent); color:#04201a; border-color:var(--accent); font-weight:600; }
-  input[type=text] { background:#11141a; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 8px; width:260px; }
+  input[type=text] { background:#11141a; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 8px; width:230px; }
   .tag { color:var(--muted); white-space:nowrap; } .tag b { color:var(--fg); }
   #hint { color:var(--muted); padding:5px 12px; font-size:12px; background:var(--panel); border-bottom:1px solid #000; }
-  #viewport { flex:1; overflow:auto; position:relative; background:#0f1115; display:flex; }
   #empty { color:var(--muted); text-align:center; margin:90px auto 0; font-size:15px; }
+  #viewport { flex:1; overflow:auto; position:relative; background:#0f1115; display:flex; }
   #stage { position:relative; margin:auto; line-height:0; box-shadow:0 0 0 1px #000, 0 8px 30px #0007; }
-  #base,#mask { position:absolute; left:0; top:0; user-select:none; -webkit-user-drag:none; image-rendering:auto; }
+  #base,#mask { position:absolute; left:0; top:0; user-select:none; -webkit-user-drag:none; }
   #base { z-index:1; } #mask { z-index:2; pointer-events:none; }
   #draw { position:absolute; left:0; top:0; z-index:3; cursor:crosshair; }
   #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#000c; border:1px solid #3a414d; padding:9px 15px; border-radius:8px; opacity:0; transition:opacity .2s; z-index:10; max-width:80vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:14px; border:1px solid #3a414d; background:#11141a; cursor:pointer; font-size:12px; }
+  .chip.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+  .dot { width:11px; height:11px; border-radius:50%; display:inline-block; }
 </style>
 </head>
 <body>
   <div id="bar">
     <b style="color:var(--accent)">SegPick</b>
     <span class="tag">img <b id="imgname">—</b></span>
-    <span class="tag">sel <b id="ptcount">0</b></span>
+    <span class="tag">pts <b id="ptcount">0</b></span>
     <span class="tag">cov <b id="cov">0%</b></span>
     <span class="tag">zoom <b id="zoom">—</b></span>
     <span class="tag" id="modeltag">—</span>
@@ -43,11 +47,20 @@
     <button onclick="setHundred()">1:1 (0)</button>
     <button onclick="api('/api/undo')">Undo (z)</button>
     <button onclick="api('/api/reset')">Reset (r)</button>
-    <button class="primary" onclick="exportCut()">Export (e)</button>
+    <button class="primary" onclick="exportMerged()">Export merged (e)</button>
+    <button onclick="exportEach()">Export each…</button>
   </div>
-  <div id="hint">Left-click <b>add</b> &nbsp;•&nbsp; Right-click <b>remove</b> &nbsp;•&nbsp; Drag <b>box</b> &nbsp;•&nbsp; Wheel <b>zoom</b> (at cursor) &nbsp;•&nbsp; Middle-drag <b>pan</b></div>
+  <div id="objbar">
+    <span class="tag">Objects</span>
+    <span id="chips"></span>
+    <button onclick="api('/api/object/new')">＋ New object (n)</button>
+    <button onclick="delObject()">🗑 Delete active</button>
+    <span class="sp"></span>
+    <span class="tag">click a chip to make it active · double-click to rename</span>
+  </div>
+  <div id="hint">Left-click <b>add</b> · Right-click <b>remove</b> · Drag <b>box</b> · Wheel <b>zoom</b> · Middle-drag <b>pan</b> &nbsp;—&nbsp; prompts apply to the <b>active</b> object</div>
   <div id="viewport">
-    <div id="empty">No image loaded. Tell Claude which image to load, or type a path above and click Load.</div>
+    <div id="empty">No image loaded. Use Browse… or tell Claude which image to load.</div>
     <div id="stage" style="display:none">
       <img id="base"/>
       <img id="mask"/>
@@ -57,18 +70,15 @@
   <div id="toast"></div>
 
 <script>
-const MARGIN = 10;                 // must match #stage margin
-let st = { version:-1, size:[0,0], points:[], box:null };
+let st = { version:-1, size:[0,0], points:[], box:null, objects:[], active:0 };
 let scale = 1, fitted = true, lastPath = null, lastVer = -1;
 const base=document.getElementById('base'), mask=document.getElementById('mask');
 const draw=document.getElementById('draw'), ctx=draw.getContext('2d');
 const stage=document.getElementById('stage'), empty=document.getElementById('empty');
 const viewport=document.getElementById('viewport');
 
-function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,2200); }
-function computeFit(){ const [W,H]=st.size; if(!W) return 1;
-  const aw=viewport.clientWidth-2*MARGIN-2, ah=viewport.clientHeight-2*MARGIN-2;
-  return Math.min(aw/W, ah/H, 1); }
+function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,2400); }
+function computeFit(){ const [W,H]=st.size; if(!W) return 1; const aw=viewport.clientWidth-22, ah=viewport.clientHeight-22; return Math.min(aw/W, ah/H, 1); }
 function clampScale(s){ const f=computeFit(); return Math.min(Math.max(s, f), f*16); }
 function zoomLabel(){ document.getElementById('zoom').textContent = st.size[0] ? Math.round(scale*100)+'%' : '—'; }
 
@@ -87,20 +97,32 @@ function redraw(){
   for(const [x,y,l] of st.points){ ctx.beginPath(); ctx.arc(x*scale,y*scale,r,0,7);
     ctx.fillStyle=l?'#27e08a':'#ff5a5a'; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#000a'; ctx.stroke(); }
 }
+function renderChips(){
+  const c=document.getElementById('chips'); c.innerHTML='';
+  (st.objects||[]).forEach((o,i)=>{
+    const el=document.createElement('span'); el.className='chip'+(i===st.active?' active':'');
+    const rgb='rgb('+o.color.join(',')+')';
+    el.innerHTML='<span class="dot" style="background:'+rgb+'"></span>'+o.name+' <span style="color:var(--muted)">'+o.coverage+'%</span>';
+    el.onclick=()=>post('/api/object/select',{index:i}).then(()=>refresh(true));
+    el.ondblclick=(ev)=>{ ev.preventDefault(); const n=prompt('Rename object', o.name); if(n) post('/api/object/rename',{index:i,name:n}).then(()=>refresh(true)); };
+    c.appendChild(el);
+  });
+}
 
 async function refresh(force){
   let s; try{ s=await (await fetch('/api/state')).json(); }catch(e){ return; }
   document.getElementById('modeltag').textContent = s.model+' @ '+s.device;
-  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; zoomLabel(); return; }
+  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; renderChips(); zoomLabel(); return; }
   st=s;
+  const act=(s.objects||[])[s.active];
   document.getElementById('imgname').textContent = s.image_path ? s.image_path.split(/[\\/]/).pop() : '—';
   document.getElementById('ptcount').textContent = s.points.length + (s.box?' +box':'');
-  document.getElementById('cov').textContent = (s.coverage||0)+'%';
+  document.getElementById('cov').textContent = (act?act.coverage:0)+'%';
   empty.style.display='none'; stage.style.display='block';
   const pathChanged=s.image_path!==lastPath, verChanged=s.version!==lastVer;
   if(pathChanged){ lastPath=s.image_path; scale=computeFit(); fitted=true; base.src='/api/image.png?v='+s.version; }
   if(pathChanged||verChanged||force) layout();
-  if(verChanged||force){ lastVer=s.version; mask.src='/api/mask.png?v='+s.version; }
+  if(verChanged||force){ lastVer=s.version; mask.src='/api/mask.png?v='+s.version; renderChips(); }
   redraw();
 }
 
@@ -114,7 +136,6 @@ viewport.addEventListener('wheel', e=>{
   if(Math.abs(ns-scale)<1e-9) return;
   scale=ns; fitted=Math.abs(scale-computeFit())<1e-6;
   layout(); redraw();
-  // nudge scroll by the delta needed to keep (ox,oy) under the cursor (works with margin:auto centering)
   const r1=base.getBoundingClientRect();
   viewport.scrollLeft += r1.left - (e.clientX - ox*scale);
   viewport.scrollTop  += r1.top  - (e.clientY - oy*scale);
@@ -146,6 +167,7 @@ draw.addEventListener('auxclick', e=>{ if(e.button===1) e.preventDefault(); });
 
 async function post(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); }
 async function api(u){ await post(u,{}); refresh(true); }
+async function delObject(){ await post('/api/object/delete',{index:st.active}); refresh(true); }
 async function loadPath(){ const p=document.getElementById('path').value.trim(); if(!p){ toast('Type a server path, or use Browse…'); return; }
   const r=await (await post('/api/load',{path:p})).json(); if(!r.ok) toast('Load failed: '+(r.error||'')); else toast('Loaded'); refresh(true); }
 document.getElementById('file').addEventListener('change', async e=>{
@@ -157,12 +179,39 @@ document.getElementById('file').addEventListener('change', async e=>{
   e.target.value=''; refresh(true);
 });
 document.getElementById('path').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); loadPath(); } });
-async function exportCut(){ const r=await (await post('/api/export',{})).json();
-  toast(r.ok?('Saved → '+r.path):('Export failed: '+(r.error||''))); }
+function exStem(){ return ((st.image_path||'image').split(/[\\/]/).pop()).replace(/\.[^.]+$/,''); }
+function exSafe(n){ return (n||'object').replace(/[^A-Za-z0-9._-]+/g,'_').replace(/^_+|_+$/g,'')||'object'; }
+function dl(blob,name){ const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href); }
+async function exportMerged(){
+  let handle=null;
+  if(window.showSaveFilePicker){
+    try{ handle=await window.showSaveFilePicker({suggestedName:exStem()+'_cutout.png', types:[{description:'PNG image',accept:{'image/png':['.png']}}]}); }
+    catch(e){ if(e.name==='AbortError') return; }
+  }
+  const r=await fetch('/api/cutout.png?mode=merged&v='+st.version);
+  if(!r.ok){ toast('Nothing selected'); return; }
+  const blob=await r.blob();
+  if(handle){ const w=await handle.createWritable(); await w.write(blob); await w.close(); toast('Saved '+handle.name); }
+  else { dl(blob, exStem()+'_cutout.png'); toast('Downloaded'); }
+}
+async function exportEach(){
+  const objs=(st.objects||[]).filter(o=>o.coverage>0);
+  if(!objs.length){ toast('Nothing selected'); return; }
+  if(window.showDirectoryPicker){
+    let dir; try{ dir=await window.showDirectoryPicker(); }catch(e){ if(e.name==='AbortError') return; }
+    if(dir){ let k=0;
+      for(const o of objs){ const r=await fetch('/api/cutout.png?obj='+o.id+'&v='+st.version); if(!r.ok) continue;
+        const fh=await dir.getFileHandle(exStem()+'__'+exSafe(o.name)+'.png',{create:true});
+        const w=await fh.createWritable(); await w.write(await r.blob()); await w.close(); k++; }
+      toast('Saved '+k+' file(s) to '+dir.name); return; }
+  }
+  for(const o of objs){ const r=await fetch('/api/cutout.png?obj='+o.id+'&v='+st.version); if(!r.ok) continue; dl(await r.blob(), exStem()+'__'+exSafe(o.name)+'.png'); }
+  toast('Downloaded '+objs.length+' file(s)');
+}
 
 addEventListener('keydown', e=>{ if(['INPUT'].includes(e.target.tagName)) return;
-  if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportCut();
-  else if(e.key==='f') setFit(); else if(e.key==='0') setHundred(); });
+  if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportMerged();
+  else if(e.key==='n') api('/api/object/new'); else if(e.key==='f') setFit(); else if(e.key==='0') setHundred(); });
 addEventListener('resize', ()=>{ if(fitted){ scale=computeFit(); layout(); redraw(); } else zoomLabel(); });
 setInterval(()=>refresh(false), 700);
 refresh(true);
