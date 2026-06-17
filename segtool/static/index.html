@@ -7,18 +7,20 @@
 <style>
   :root { --bg:#15171c; --panel:#1f232b; --fg:#e6e9ef; --muted:#868f9f; --accent:#27c2a0; }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,Segoe UI,sans-serif; }
-  #bar { display:flex; gap:10px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid #000; flex-wrap:wrap; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,Segoe UI,sans-serif; display:flex; flex-direction:column; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px; background:var(--panel); border-bottom:1px solid #000; flex-wrap:wrap; }
   #bar .sp { flex:1; }
-  button { background:#2b313b; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; }
+  button { background:#2b313b; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 11px; cursor:pointer; font-size:13px; }
   button:hover { background:#343b47; }
   button.primary { background:var(--accent); color:#04201a; border-color:var(--accent); font-weight:600; }
-  input[type=text] { background:#11141a; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 8px; width:300px; }
+  input[type=text] { background:#11141a; color:var(--fg); border:1px solid #3a414d; border-radius:6px; padding:6px 8px; width:260px; }
   .tag { color:var(--muted); white-space:nowrap; } .tag b { color:var(--fg); }
-  #hint { color:var(--muted); padding:5px 12px; font-size:12px; }
-  #empty { color:var(--muted); text-align:center; margin-top:90px; font-size:15px; }
-  #stage { position:relative; margin:12px auto; line-height:0; box-shadow:0 0 0 1px #000, 0 8px 30px #0007; }
-  #base,#mask { position:absolute; left:0; top:0; user-select:none; -webkit-user-drag:none; }
+  #hint { color:var(--muted); padding:5px 12px; font-size:12px; background:var(--panel); border-bottom:1px solid #000; }
+  #viewport { flex:1; overflow:auto; position:relative; background:#0f1115; display:flex; }
+  #empty { color:var(--muted); text-align:center; margin:90px auto 0; font-size:15px; }
+  #stage { position:relative; margin:auto; line-height:0; box-shadow:0 0 0 1px #000, 0 8px 30px #0007; }
+  #base,#mask { position:absolute; left:0; top:0; user-select:none; -webkit-user-drag:none; image-rendering:auto; }
   #base { z-index:1; } #mask { z-index:2; pointer-events:none; }
   #draw { position:absolute; left:0; top:0; z-index:3; cursor:crosshair; }
   #toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:#000c; border:1px solid #3a414d; padding:9px 15px; border-radius:8px; opacity:0; transition:opacity .2s; z-index:10; max-width:80vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -30,75 +32,115 @@
     <span class="tag">img <b id="imgname">—</b></span>
     <span class="tag">sel <b id="ptcount">0</b></span>
     <span class="tag">cov <b id="cov">0%</b></span>
+    <span class="tag">zoom <b id="zoom">—</b></span>
     <span class="tag" id="modeltag">—</span>
     <span class="sp"></span>
-    <input id="path" type="text" placeholder="image path (or just tell Claude to load one)"/>
+    <input id="path" type="text" placeholder="image path (or ask Claude to load one)"/>
     <button onclick="loadPath()">Load</button>
+    <button onclick="setFit()">Fit (f)</button>
+    <button onclick="setHundred()">1:1 (0)</button>
     <button onclick="api('/api/undo')">Undo (z)</button>
     <button onclick="api('/api/reset')">Reset (r)</button>
-    <button class="primary" onclick="exportCut()">Export PNG (e)</button>
+    <button class="primary" onclick="exportCut()">Export (e)</button>
   </div>
-  <div id="hint">Left-click <b>add</b> &nbsp;•&nbsp; Right-click <b>remove</b> &nbsp;•&nbsp; Drag <b>box</b> &nbsp;•&nbsp; mask updates after each action</div>
-  <div id="empty">No image loaded. Tell Claude which image to load, or type a path above and click Load.</div>
-  <div id="stage" style="display:none">
-    <img id="base"/>
-    <img id="mask"/>
-    <canvas id="draw"></canvas>
+  <div id="hint">Left-click <b>add</b> &nbsp;•&nbsp; Right-click <b>remove</b> &nbsp;•&nbsp; Drag <b>box</b> &nbsp;•&nbsp; Wheel <b>zoom</b> (at cursor) &nbsp;•&nbsp; Middle-drag <b>pan</b></div>
+  <div id="viewport">
+    <div id="empty">No image loaded. Tell Claude which image to load, or type a path above and click Load.</div>
+    <div id="stage" style="display:none">
+      <img id="base"/>
+      <img id="mask"/>
+      <canvas id="draw"></canvas>
+    </div>
   </div>
   <div id="toast"></div>
 
 <script>
+const MARGIN = 10;                 // must match #stage margin
 let st = { version:-1, size:[0,0], points:[], box:null };
-let scale = 1, lastPath = null, lastVer = -1;
+let scale = 1, fitted = true, lastPath = null, lastVer = -1;
 const base=document.getElementById('base'), mask=document.getElementById('mask');
 const draw=document.getElementById('draw'), ctx=draw.getContext('2d');
 const stage=document.getElementById('stage'), empty=document.getElementById('empty');
+const viewport=document.getElementById('viewport');
 
 function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.opacity=1; clearTimeout(t._h); t._h=setTimeout(()=>t.style.opacity=0,2200); }
-function fitScale(W,H){ return Math.min((innerWidth-40)/W, (innerHeight-115)/H, 1); }
+function computeFit(){ const [W,H]=st.size; if(!W) return 1;
+  const aw=viewport.clientWidth-2*MARGIN-2, ah=viewport.clientHeight-2*MARGIN-2;
+  return Math.min(aw/W, ah/H, 1); }
+function clampScale(s){ const f=computeFit(); return Math.min(Math.max(s, f), f*16); }
+function zoomLabel(){ document.getElementById('zoom').textContent = st.size[0] ? Math.round(scale*100)+'%' : '—'; }
 
 function layout(){
-  const [W,H]=st.size; scale=fitScale(W,H);
-  const dW=Math.round(W*scale), dH=Math.round(H*scale);
+  const [W,H]=st.size; const dW=Math.round(W*scale), dH=Math.round(H*scale);
   stage.style.width=dW+'px'; stage.style.height=dH+'px';
   for(const el of [base,mask]){ el.style.width=dW+'px'; el.style.height=dH+'px'; }
   draw.width=dW; draw.height=dH; draw.style.width=dW+'px'; draw.style.height=dH+'px';
+  zoomLabel();
 }
 function redraw(){
   ctx.clearRect(0,0,draw.width,draw.height);
   if(st.box){ const [x0,y0,x1,y1]=st.box.map(v=>v*scale);
     ctx.strokeStyle='#ffd23f'; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(x0,y0,x1-x0,y1-y0); ctx.setLineDash([]); }
-  for(const [x,y,l] of st.points){ ctx.beginPath(); ctx.arc(x*scale,y*scale,5,0,7);
+  const r=Math.max(4, Math.min(7, 5*Math.sqrt(scale/computeFit())));
+  for(const [x,y,l] of st.points){ ctx.beginPath(); ctx.arc(x*scale,y*scale,r,0,7);
     ctx.fillStyle=l?'#27e08a':'#ff5a5a'; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle='#000a'; ctx.stroke(); }
 }
 
 async function refresh(force){
   let s; try{ s=await (await fetch('/api/state')).json(); }catch(e){ return; }
   document.getElementById('modeltag').textContent = s.model+' @ '+s.device;
-  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; return; }
+  if(!s.size || !s.size[0]){ stage.style.display='none'; empty.style.display='block'; lastPath=null; lastVer=-1; st=s; zoomLabel(); return; }
   st=s;
   document.getElementById('imgname').textContent = s.image_path ? s.image_path.split(/[\\/]/).pop() : '—';
   document.getElementById('ptcount').textContent = s.points.length + (s.box?' +box':'');
   document.getElementById('cov').textContent = (s.coverage||0)+'%';
   empty.style.display='none'; stage.style.display='block';
   const pathChanged=s.image_path!==lastPath, verChanged=s.version!==lastVer;
+  if(pathChanged){ lastPath=s.image_path; scale=computeFit(); fitted=true; base.src='/api/image.png?v='+s.version; }
   if(pathChanged||verChanged||force) layout();
-  if(pathChanged){ lastPath=s.image_path; base.src='/api/image.png?v='+s.version; }
   if(verChanged||force){ lastVer=s.version; mask.src='/api/mask.png?v='+s.version; }
   redraw();
 }
 
-let down=null, moved=false;
-draw.addEventListener('mousedown', e=>{ if(e.button!==0) return; down=[e.offsetX,e.offsetY]; moved=false; });
+// ---- zoom (wheel, cursor-anchored) ----
+viewport.addEventListener('wheel', e=>{
+  if(!st.size || !st.size[0]) return;
+  e.preventDefault();
+  const r=base.getBoundingClientRect();
+  const ox=(e.clientX-r.left)/scale, oy=(e.clientY-r.top)/scale;
+  const ns=clampScale(scale*Math.exp(-e.deltaY*0.0015));
+  if(Math.abs(ns-scale)<1e-9) return;
+  scale=ns; fitted=Math.abs(scale-computeFit())<1e-6;
+  layout(); redraw();
+  // nudge scroll by the delta needed to keep (ox,oy) under the cursor (works with margin:auto centering)
+  const r1=base.getBoundingClientRect();
+  viewport.scrollLeft += r1.left - (e.clientX - ox*scale);
+  viewport.scrollTop  += r1.top  - (e.clientY - oy*scale);
+}, {passive:false});
+
+function setFit(){ if(!st.size[0])return; scale=computeFit(); fitted=true; layout(); redraw(); }
+function setHundred(){ if(!st.size[0])return; scale=clampScale(1); fitted=false; layout(); redraw(); centerView(); }
+function centerView(){ viewport.scrollLeft=(stage.offsetWidth-viewport.clientWidth)/2; viewport.scrollTop=(stage.offsetHeight-viewport.clientHeight)/2; }
+
+// ---- pointer: left add / right remove / drag box / middle pan ----
+let down=null, moved=false, pan=null;
+draw.addEventListener('mousedown', e=>{
+  if(e.button===1){ e.preventDefault(); pan=[e.clientX,e.clientY]; return; }
+  if(e.button!==0) return; down=[e.offsetX,e.offsetY]; moved=false;
+});
 draw.addEventListener('mousemove', e=>{ if(!down) return;
   if(Math.hypot(e.offsetX-down[0],e.offsetY-down[1])>5) moved=true;
   if(moved){ redraw(); ctx.strokeStyle='#ffd23f'; ctx.lineWidth=2; ctx.setLineDash([6,4]); ctx.strokeRect(down[0],down[1],e.offsetX-down[0],e.offsetY-down[1]); ctx.setLineDash([]); } });
-draw.addEventListener('mouseup', async e=>{ if(!down) return; const s=down; down=null;
+draw.addEventListener('mouseup', async e=>{ if(e.button!==0 || !down) return; const s=down; down=null;
   if(moved){ await post('/api/box',{x0:s[0]/scale,y0:s[1]/scale,x1:e.offsetX/scale,y1:e.offsetY/scale}); }
   else { await post('/api/click',{x:e.offsetX/scale,y:e.offsetY/scale,label:1}); }
   refresh(true); });
 draw.addEventListener('contextmenu', async e=>{ e.preventDefault();
   await post('/api/click',{x:e.offsetX/scale,y:e.offsetY/scale,label:0}); refresh(true); });
+window.addEventListener('mousemove', e=>{ if(!pan) return;
+  viewport.scrollLeft-=(e.clientX-pan[0]); viewport.scrollTop-=(e.clientY-pan[1]); pan=[e.clientX,e.clientY]; });
+window.addEventListener('mouseup', e=>{ if(e.button===1) pan=null; });
+draw.addEventListener('auxclick', e=>{ if(e.button===1) e.preventDefault(); });
 
 async function post(u,b){ return fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); }
 async function api(u){ await post(u,{}); refresh(true); }
@@ -108,8 +150,9 @@ async function exportCut(){ const r=await (await post('/api/export',{})).json();
   toast(r.ok?('Saved → '+r.path):('Export failed: '+(r.error||''))); }
 
 addEventListener('keydown', e=>{ if(['INPUT'].includes(e.target.tagName)) return;
-  if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportCut(); });
-addEventListener('resize', ()=>refresh(true));
+  if(e.key==='z') api('/api/undo'); else if(e.key==='r') api('/api/reset'); else if(e.key==='e') exportCut();
+  else if(e.key==='f') setFit(); else if(e.key==='0') setHundred(); });
+addEventListener('resize', ()=>{ if(fitted){ scale=computeFit(); layout(); redraw(); } else zoomLabel(); });
 setInterval(()=>refresh(false), 700);
 refresh(true);
 </script>
