@@ -156,6 +156,23 @@ def api_load():
     return jsonify({"ok": True, "size": S.size, "path": path})
 
 
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    """Accept an image uploaded from the browser file picker (no server path needed)."""
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    with lock:
+        img = Image.open(f.stream).convert("RGB")
+        S.image = np.array(img)
+        S.size = [img.width, img.height]
+        S.image_path = f.filename  # display name only
+        S.points, S.box, S.mask = [], None, None
+        SEG.set_image(S.image)
+        S.version += 1
+    return jsonify({"ok": True, "size": S.size, "path": f.filename})
+
+
 @app.route("/api/click", methods=["POST"])
 def api_click():
     data = request.get_json(force=True)
